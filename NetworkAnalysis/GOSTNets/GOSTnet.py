@@ -124,47 +124,48 @@ def edge_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None):
 
     return edges_gdf
 
-def snap_points_to_graph(G, points, crs = None, response = None):
+def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', connection_threshold = 5000):
 
     #### Function for generating GeoDataFrame from Graph ####
     # REQUIRED: a GeoDataFrame of point objects (points_gdf)
     #           a Graph object or geodataframe
+    # OPTIONAL: response: return result in different formats - dataframe, list, or
+    #           list of unique nearest nodes
+    #           geomcol: specify a different column name to the default for the
+    #           geometry column of the input GeoDataframe. Useful for GeoDataFrames
+    #           that include multiple columns with shapely geometry info
+    #           connection threshold: stop considering nodes further than the connection_threshold. Default 5km.
     # RETURNS:  an augmented version of the input GeoDataFrame with the node_ID of
     #           the nearest nodes to the points in the graph
     # Note:     ensure any GeoDataFrames are in the same projection
     #           before using function, or pass a crs
     # -------------------------------------------------------------------------#
 
-    import networkx as nx
-    import geopandas as gpd
-    from shapely.ops import nearest_points
+    node_df_G1 = node_gdf_from_graph(G)
 
-    if type(G) == gpd.geodataframe.GeoDataFrame:
-        graph_gdf = G
-    else:
-        try:
-            graph_gdf = node_gdf_from_graph(G)
-            if crs is not None:
-                graph_gdf.crs = crs
-        except:
-            raise ValueError('Expecting a graph or geodataframe for G!')
+    if type(points) != gpd.geodataframe.GeoDataFrame:
+        raise ValueError('points variable must be of type GeoDataFrame!')
 
-    if points.crs != graph_gdf.crs:
-        raise ValueError('crs mismatch detected! aborting process')
+    nn = []
 
-    graph_gdf_uu = graph_gdf.geometry.unary_union
+    for i, row in points.iterrows():
 
-    def near(point, graph_gdf_uu):
-        nearest = graph_gdf.geometry == nearest_points(point, graph_gdf_uu)[1]
-        return graph_gdf[nearest].node_ID.get_values()[0]
+        pointobj = points[geomcol].loc[i]
 
-    points['Nearest_node'] = points.apply(lambda x: near(x.geometry, graph_gdf_uu), axis=1)
+        point = (pointobj.x, pointobj.y)
+
+        nearest_nodes = get_nearest_nodes(node_df_G1, point, connection_threshold = connection_threshold)
+
+        nn.append(nearest_nodes.end_node.loc[nearest_nodes.length.idxmin()])
+
+    points['Nearest_node'] = nn
+
     if response is None:
         return points
     elif response == 'list':
         return list(points['Nearest_node'])
     elif response == 'unique_list':
-        return list(set(list(points['Nearest_node'])))
+        return list(set(nn))
     else:
         ValueError('response parameter not recongized!')
 
@@ -509,12 +510,7 @@ def convert_network_to_time(G, distance_tag, graph_type = 'drive', speed_dict = 
 
     return G_adj
 
-def bind_graphs(G1: nx.MultiDiGraph,
-                              G2: nx.MultiDiGraph,
-                              name: str,
-                              exempt_nodes: list,
-                              connection_threshold: float,
-                              speed: 4.5) -> pd.DataFrame:
+def bind_graphs(G1,G2,name, exempt_nodes, connection_threshold = 50, speed = 4.5, verbose = True):
 
     import numpy as np
     import peartree.graph as ptg
@@ -536,7 +532,10 @@ def bind_graphs(G1: nx.MultiDiGraph,
 
     nn = []
 
+    i, j = 1, 0
+    ten_pct = int(len(node_df_G2) / 10)
     for i, row in node_df_G2.iterrows():
+
         sid = str(row.node_ID)
         full_sid = ptg.nameify_stop_id(name, sid)
 
@@ -554,14 +553,21 @@ def bind_graphs(G1: nx.MultiDiGraph,
         # Iterate through series results and add to output
         nearest_nodes['start_node'] = sid
         nearest_nodes['start_point'] = Point(point)
+        nearest_nodes['mode'] = 'network_binding'
+        nearest_nodes = nearest_nodes.loc[nearest_nodes.length < connection_threshold]
 
         nn.append(nearest_nodes)
 
+        if i % ten_pct == 0 and verbose == True:
+            print('    finished binding %d percent of nodes' % (j*10))
+            j+= 1
+        i += 1
+
     nearest_nodes = pd.concat(nn)
-    nearest_nodes = nearest_nodes.loc[nearest_nodes.length < connection_threshold]
-    nearest_nodes['end_point'] = nearest_nodes.apply(lambda x: Point(x.end_point_x, x.end_point_y), axis =1)
+
+    nearest_nodes['end_point'] = nearest_nodes.apply(lambda x: Point(x.end_point_x, x.end_point_y), axis = 1)
     nearest_nodes = nearest_nodes[['start_node','start_point','end_node','end_point','length']]
-    nearest_nodes['geometry'] = nearest_nodes.apply(lambda x: LineString((x.start_point, x.end_point)), axis =1)
+    nearest_nodes['geometry'] = nearest_nodes.apply(lambda x: LineString((x.start_point, x.end_point)), axis = 1)
 
     Gnew = G1.copy()
     G2_nodes = list(G2.nodes(data = True))
@@ -579,7 +585,10 @@ def bind_graphs(G1: nx.MultiDiGraph,
         in_seconds = kmph * 60 * 60
 
         e = (row.start_node, row.end_node, {'length':orig_len, 'time':in_seconds})
+        f = (row.end_node, row.start_node, {'length':orig_len, 'time':in_seconds})
+
         edge_list.append(e)
+        edge_list.append(f)
 
     Gnew.add_edges_from(edge_list)
 
@@ -807,8 +816,6 @@ def test_connectivity(G, target_node):
 
     print('connected nodes: %s' % worked)
     print('broken nodes: %s' % failed)
-
-    return G
 
 def gravity_demand(G, origins, destinations, weight, maxtrips = 100, dist_decay = 1, fail_value = 99999999999):
     #### Function for generating a gravity-model based demand matrix ####
