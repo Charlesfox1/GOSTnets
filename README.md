@@ -1,6 +1,7 @@
-# GOSTnets
-This is a high-level python wrapper for Networkx, OSMNX and other network analysis libaries. It aims to make basic network analysis easier for those familiar with GeoPandas. 
+### GOSTNets
+This package contains a library and example notebooks for running network analysis leveraging a number of existing network analysis libraries: peartree, osmnx, and networkx
 
-Typical tasks include: calculation of OD matrices, occlusion based on raster values / polygon intersection, and ETL from Networkx objects to GeoPandas objects. 
-
-The content of this library is almost entirely based on work done by Geoff Boeing, Kuan Butts and other pioneers in network analysis - thank go to them for writing such beautiful and easily adapted code. 
+The package contains three folders:
+1. GOSTNets - the library containng the functions for running the network analysis
+2. SampleData - data for running examples found in Notebooks
+3. Notebooks - sample notebooks for runnning analyses
