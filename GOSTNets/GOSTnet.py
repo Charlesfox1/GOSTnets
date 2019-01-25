@@ -1,3 +1,7 @@
+import os, sys, logging, warnings, time
+
+import pyproj
+
 import peartree as pt
 import peartree.graph as ptg
 print('peartree version: %s ' % pt.__version__)
@@ -7,20 +11,158 @@ import matplotlib as mpl
 print('matplotlib version: %s ' % mpl.__version__)
 import osmnx as ox
 print('osmnx version: %s ' % ox.__version__)
-import os, sys
-import pandas as pd, geopandas as gpd
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+
 from functools import partial
-import pyproj
 from shapely.ops import transform, linemerge
 from shapely.wkt import loads
-from shapely.geometry import Point, LineString, MultiLineString
+from shapely.geometry import Point, LineString, MultiLineString, box
 from shapely.ops import linemerge, unary_union
-import time
-import numpy as np
 from collections import Counter
-import warnings
 
-def node_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None):
+speed_dict = {
+                'residential': 20,  # kmph
+                'primary': 40, # kmph
+                'primary_link':35,
+                'motorway':45,
+                'motorway_link': 40,
+                'trunk': 40,
+                'trunk_link':35,
+                'secondary': 30, # kmph
+                'secondary_link':25,
+                'tertiary':30,
+                'tertiary_link': 25,
+                'unclassified':20,
+                'road':20,
+                'crossing':20,
+                'living_street':20
+                }
+
+def combo_csv_to_graph(fpath, u_tag = 'u', v_tag = 'v', geometry_tag = 'Wkt', largest_G = False):
+    #### Function for generating a G object from a saved combo .csv ####
+    # REQUIRED: fpath - path to a .csv containing edges (WARNING: COMBO CSV only)
+    # OPTIONAL: u_tag - specify column containing u node ID if not labelled 'u'
+    #           v_tag - specify column containing u node ID if not labelled 'v'
+    #           geometry_tag - specify column containing u node ID if not labelled 'Wkt'
+    # RETURNS: a multidigraph object
+    # -------------------------------------------------------------------------#
+
+    edges_1 = pd.read_csv(os.path.join(fpath))
+
+    edges = edges_1.copy()
+
+    node_bunch = list(set(list(edges[u_tag]) + list(edges[v_tag])))
+
+    col_list = list(edges.columns)
+    drop_cols = [u_tag, v_tag, geometry_tag]
+    attr_list = [col_entry for col_entry in col_list if col_entry not in drop_cols]
+    def convert(x, attr_list):
+        u = x[u_tag]
+        v = x[v_tag]
+        data = {'Wkt':loads(x[geometry_tag])}
+        for i in attr_list:
+            data[i] = x[i]
+
+        return (u, v, data)
+
+    edge_bunch = edges.apply(lambda x: convert(x, attr_list), axis = 1).tolist()
+
+    G = nx.MultiDiGraph()
+
+    G.add_nodes_from(node_bunch)
+    G.add_edges_from(edge_bunch)
+
+    for u, data in G.nodes(data = True):
+        q = tuple(float(x) for x in u[1:-1].split(','))
+        data['x'] = q[0]
+        data['y'] = q[1]
+
+    G = nx.convert_node_labels_to_integers(G)
+
+    if largest_G == True:
+        list_of_subgraphs = list(nx.strongly_connected_component_subgraphs(G))
+        l = 0
+        cur_max = 0
+        for i in list_of_subgraphs:
+            if i.number_of_edges() > cur_max:
+                cur_max = i.number_of_edges()
+                max_ID = l
+            l +=1
+        G = list_of_subgraphs[max_ID]
+
+    return G
+
+def edges_and_nodes_csv_to_graph(fpath_nodes, fpath_edges, u_tag = 'stnode', v_tag = 'endnode', geometry_tag = 'Wkt', largest_G = False):
+    #### Function for generating a G object from a saved .csv of edges ####
+    # REQUIRED: fpath_nodes - path to a .csv containing nodes
+    #           fpath_edges - path to a .csv containing edges
+    # OPTIONAL: u_tag - specify column containing u node ID if not labelled 'stnode'
+    #           v_tag - specify column containing u node ID if not labelled 'endnode'
+    #           geometry_tag - specify column containing u node ID if not labelled 'Wkt'
+    # RETURNS: a multidigraph object
+    # -------------------------------------------------------------------------#
+
+    nodes_df = pd.read_csv(fpath_nodes)
+    edges_df = pd.read_csv(fpath_edges)
+
+    chck_set = list(set(list(edges_df[u_tag]) + list(edges_df[v_tag])))
+
+    def check(x, chck_set):
+        if x in chck_set:
+            return 1
+        else:
+            return 0
+
+    nodes_df['chck'] = nodes_df['node_ID'].apply(lambda x: check(x, chck_set))
+
+    nodes_df = nodes_df.loc[nodes_df.chck == 1]
+
+    def convert_nodes(x):
+        u = x.node_ID
+        data = {'x':x.x,
+               'y':x.y}
+        return (u, data)
+
+    node_bunch = nodes_df.apply(lambda x: convert_nodes(x), axis = 1).tolist()
+
+    col_list = list(edges_df.columns)
+    drop_cols = [u_tag, v_tag, geometry_tag]
+    attr_list = [col_entry for col_entry in col_list if col_entry not in drop_cols]
+
+    def convert_edges(x):
+        u = x[u_tag]
+        v = x[v_tag]
+        data = {'Wkt':loads(x[geometry_tag])}
+        for i in attr_list:
+            data[i] = x[i]
+
+        return (u, v, data)
+
+    edge_bunch = edges_df.apply(lambda x: convert_edges(x), axis = 1).tolist()
+
+    G = nx.MultiDiGraph()
+
+    G.add_nodes_from(node_bunch)
+    G.add_edges_from(edge_bunch)
+
+    G = nx.convert_node_labels_to_integers(G)
+
+    if largest_G == True:
+        list_of_subgraphs = list(nx.strongly_connected_component_subgraphs(G))
+        l = 0
+        cur_max = 0
+        for i in list_of_subgraphs:
+            if i.number_of_edges() > cur_max:
+                cur_max = i.number_of_edges()
+                max_ID = l
+            l +=1
+        G = list_of_subgraphs[max_ID]
+
+    return G
+
+def node_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None, xCol='x', yCol='y'):
 
     #### Function for generating GeoDataFrame from Graph ####
     # REQUIRED: a graph object G
@@ -49,13 +191,13 @@ def node_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None):
 
     for u, data in G.nodes(data=True):
 
-        if 'geometry' not in attr_list and 'x' in attr_list and 'y' in attr_list :
+        if 'geometry' not in attr_list and xCol in attr_list and yCol in attr_list :
             try:
                 new_column_info = {
                 'node_ID': u,
-                'geometry': Point(data['x'], data['y']),
-                'x': data['x'],
-                'y': data['y']}
+                'geometry': Point(data[xCol], data[yCol]),
+                'x': data[xCol],
+                'y': data[yCol]}
             except:
                 print((u, data))
         else:
@@ -67,6 +209,7 @@ def node_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None):
                 'y':data['geometry'].y}
             except:
                 print((u, data))
+
         for i in non_geom_attr_list:
             try:
                 new_column_info[i] = data[i]
@@ -83,7 +226,7 @@ def node_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None):
 
     return nodes_gdf
 
-def edge_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None, geom_col = 'geometry'):
+def edge_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None, geom_col = 'geometry', xCol='x', yCol = 'y'):
 
     #### Function for generating GeoDataFrame from Graph ####
     # REQUIRED: a graph object G
@@ -115,10 +258,10 @@ def edge_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None, geom_c
         else:
             # if it doesn't have a geometry attribute, the edge is a straight
             # line from node to node
-            x1 = G.nodes[u]['x']
-            y1 = G.nodes[u]['y']
-            x2 = G.nodes[v]['x']
-            y2 = G.nodes[v]['y']
+            x1 = G.nodes[u][xCol]
+            y1 = G.nodes[u][yCol]
+            x2 = G.nodes[v][xCol]
+            y2 = G.nodes[v][yCol]
             geom = LineString([(x1, y1), (x2, y2)])
 
         new_column_info = {
@@ -140,8 +283,10 @@ def edge_gdf_from_graph(G, crs = {'init' :'epsg:4326'}, attr_list = None, geom_c
 
     return edges_gdf
 
-def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', connection_threshold = 5000):
-
+def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', connection_threshold = 5000, xCol='x', yCol='y'):
+    print('WARNING! Fully deprecated. try using pandana_snap instead!')
+    return
+    """
     #### Function for generating GeoDataFrame from Graph ####
     # REQUIRED: a GeoDataFrame of point objects (points_gdf)
     #           a Graph object or geodataframe
@@ -157,7 +302,7 @@ def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', conne
     #           before using function, or pass a crs
     # -------------------------------------------------------------------------#
 
-    node_df_G1 = node_gdf_from_graph(G)
+    node_df_G1 = node_gdf_from_graph(G, xCol=xCol, yCol=yCol)
 
     if type(points) != gpd.geodataframe.GeoDataFrame:
         raise ValueError('points variable must be of type GeoDataFrame!')
@@ -170,7 +315,7 @@ def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', conne
 
         point = (pointobj.x, pointobj.y)
 
-        nearest_nodes = get_nearest_nodes(node_df_G1, point, connection_threshold = connection_threshold)
+        nearest_nodes = get_nearest_nodes(node_df_G1, point, connection_threshold = connection_threshold, xCol=xCol, yCol=yCol)
 
         try:
             nrst_node = nearest_nodes.end_node.loc[nearest_nodes.length.idxmin()]
@@ -193,7 +338,7 @@ def snap_points_to_graph(G, points, response = None, geomcol = 'geometry', conne
         return list(set(nn))
     else:
         ValueError('response parameter not recongized!')
-
+    """
 def graph_nodes_intersecting_polygon(G, polygons, crs = None):
 
     #### Function for generating GeoDataFrame from Graph ####
@@ -314,16 +459,32 @@ def sample_raster(G, tif_path, property_name = 'RasterValue'):
     except:
         raise ValueError('Expecting a path to a .tif file!')
 
-    # create list of values
-    raster_values = list(dataset.sample(list_of_nodes.values()))
+    # create list of values, throw out nodes that don't intersect the bounds of the raster
+    b = dataset.bounds
+    datasetBoundary = box(b[0], b[1], b[2], b[3])
+    selKeys = []
+    selPts = []
+    for key, pt in list_of_nodes.items():
+        if Point(pt[0], pt[1]).intersects(datasetBoundary):
+            selPts.append(pt)
+            selKeys.append(key)
+    raster_values = list(dataset.sample(selPts))
     raster_values = [x[0] for x in raster_values]
 
     # generate new dictionary of {node ID: raster values}
-    ref = dict(zip(list_of_nodes.keys(), raster_values))
+    ref = dict(zip(selKeys, raster_values))
 
     # load new values onto node data dictionary
+    missedCnt = 0
     for u, data in G.nodes(data=True):
-        data[property_name] = ref[u]
+        try:
+            data[property_name] = ref[u]
+        except:
+            missedCnt += 1
+            logging.info("Could not add flood depth to node %s" % u)
+    logging.info("Number of original nodes: %s" % len(G.nodes))
+    logging.info("Number of missed nodes in raster: %d" % missedCnt)
+    logging.info("Number of nodes that intersected raster: %d" % len(selKeys))
 
     return G
 
@@ -530,192 +691,17 @@ def convert_network_to_time(G, distance_tag, graph_type = 'drive', road_col = 'h
 
     return G_adj
 
-def bind_graphs(G1,G2,name, exempt_nodes, connection_threshold = 50, speed = 4.5, verbose = True):
-
-    # Terminate this process early if either graph is empty
-    if (G1.number_of_nodes() == 0) or (G2.number_of_nodes() == 0) :
-        return pd.DataFrame({'stop_id': [],
-                             'to_nodes': [],
-                             'edge_costs': []})
-
-    # First, we need a DataFrame representation of the nodes in the graph
-    node_df_G1 = node_gdf_from_graph(G1)
-    node_df_G2 = node_gdf_from_graph(G2)
-
-    # Remove all nodes that are part of the new additions to the graph
-    if len(exempt_nodes) > 0:
-        node_df_G2 = node_df_G2[~node_df_G2.index.isin(exempt_nodes)]
-
-    nn = []
-
-    i, j = 1, 0
-    ten_pct = int(len(node_df_G2) / 10)
-    for i, row in node_df_G2.iterrows():
-
-        sid = str(row.node_ID)
-        full_sid = ptg.nameify_stop_id(name, sid)
-
-        # Ensure that each value is typed correctly prior to being
-        # fed into the nearest node method
-        lon = float(row.x)
-        lat = float(row.y)
-        point = (lon, lat)
-
-        nearest_nodes = get_nearest_nodes(node_df_G1,
-                                          point,
-                                          connection_threshold,
-                                          exempt_id=full_sid)
-
-        # Iterate through series results and add to output
-        nearest_nodes['start_node'] = sid
-        nearest_nodes['start_point'] = Point(point)
-        nearest_nodes['mode'] = 'network_binding'
-        nearest_nodes = nearest_nodes.loc[nearest_nodes.length < connection_threshold]
-
-        nn.append(nearest_nodes)
-
-        if i % ten_pct == 0 and verbose == True:
-            print('    finished binding %d percent of nodes' % (j*10))
-            j+= 1
-        i += 1
-
-    nearest_nodes = pd.concat(nn)
-
-    nearest_nodes['end_point'] = nearest_nodes.apply(lambda x: Point(x.end_point_x, x.end_point_y), axis = 1)
-    nearest_nodes = nearest_nodes[['start_node','start_point','end_node','end_point','length']]
-    nearest_nodes['geometry'] = nearest_nodes.apply(lambda x: LineString((x.start_point, x.end_point)), axis = 1)
-
-    Gnew = G1.copy()
-    G2_nodes = list(G2.nodes(data = True))
-    Gnew.add_nodes_from(G2_nodes)
-    G2_edges = list(G2.edges(data = True))
-    Gnew.add_edges_from(G2_edges)
-
-    edge_list = []
-
-    for i, row in nearest_nodes.iterrows():
-
-        orig_len = row.length
-
-        kmph = (orig_len / 1000) / speed
-        in_seconds = kmph * 60 * 60
-
-        e = (row.start_node, row.end_node, {'length':orig_len, 'time':in_seconds})
-        f = (row.end_node, row.start_node, {'length':orig_len, 'time':in_seconds})
-
-        edge_list.append(e)
-        edge_list.append(f)
-
-    Gnew.add_edges_from(edge_list)
-
-    return Gnew
-
-def great_circle_vec(lat1: float,
-                     lng1: float,
-                     lat2: float,
-                     lng2: float,
-                     earth_radius: float=6371009.0) -> float:
-    """
-    Vectorized function to calculate the great-circle distance between two
-    points or between vectors of points.
-    Please note that this method is copied from OSMnx method of the same name,
-    which can be accessed here:
-    https://github.com/gboeing/osmnx/blob/
-    b32f8d333c6965a0d2f27c1f3224a29de2f08d55/osmnx/utils.py#L262
-    Parameters
-    ----------
-    lat1 : float or array of float
-    lng1 : float or array of float
-    lat2 : float or array of float
-    lng2 : float or array of float
-    earth_radius : numeric
-        radius of earth in units in which distance will be returned (default is
-        meters)
-    Returns
-    -------
-    distance : float
-        distance or vector of distances from (lat1, lng1) to (lat2, lng2) in
-        units of earth_radius
-    """
-    import warnings
-
-    phi1 = np.deg2rad(90 - lat1)
-    phi2 = np.deg2rad(90 - lat2)
-
-    theta1 = np.deg2rad(lng1)
-    theta2 = np.deg2rad(lng2)
-
-    cos = (np.sin(phi1) * np.sin(phi2) * np.cos(theta1 - theta2) \
-           + np.cos(phi1) * np.cos(phi2))
-
-    # Ignore warnings during this calculation because numpy warns it cannot
-    # calculate arccos for self-loops since u==v
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        arc = np.arccos(cos)
-
-    # Return distance in units of earth_radius
-    distance = arc * earth_radius
-    return distance
-
-def get_nearest_nodes(df_orig: pd.DataFrame,
-                      point,
-                      connection_threshold: float,
-                      exempt_id: str=None):
-    # This method breaks out a portion of a similar method from
-    # OSMnx's get_nearest_node; source:
-    #   https://github.com/gboeing/osmnx/blob/
-    #   b32f8d333c6965a0d2f27c1f3224a29de2f08d55/osmnx/utils.py#L326
-
-    # Make a copy of the DataFrame to prevent mutation outside of function
-    df = df_orig.copy()
-
-    if exempt_id is not None:
-        df.index = df.index.astype(str)
-        mask = ~(df.index == exempt_id)
-        df = df[mask]
-
-    # Add second column of reference points
-    df['reference_y'] = point[1]
-    df['reference_x'] = point[0]
-
-    # TODO: OSMnx supports euclidean as well, for now we have a stumped
-    #       version of this same function
-
-    # Ensure each vectorized series is typed correctly
-    ref_ys = df['reference_y'].astype(float)
-    ref_xs = df['reference_x'].astype(float)
-    ys = df['y'].astype(float)
-    xs = df['x'].astype(float)
-
-    # Calculate distance vector using great circle distances (ie, for
-    # spherical lat-long geometries)
-    distances = great_circle_vec(lat1=ref_ys,
-                                 lng1=ref_xs,
-                                 lat2=ys,
-                                 lng2=xs)
-
-    # Filter out nodes outside connection threshold
-
-    nearest_nodes = pd.DataFrame({'length':distances,
-                                  'end_node':df.node_ID,
-                                 'end_point_x':df.x,
-                                  'end_point_y':df.y})
-
-    # Return filtered series
-    return nearest_nodes
-
-def example_edge(G, n):
+def example_edge(G, n=1):
     i = list(G.edges(data = True))[:n]
     for j in i:
         print(j)
 
-def example_node(G, n):
+def example_node(G, n=1):
     i = list(G.nodes(data = True))[:n]
     for j in i:
         print(j)
 
-def calculate_OD(G, origins, destinations, fail_value):
+def calculate_OD(Z, origins, destinations, fail_value):
     #### Function for generating an origin: destination matrix  ####
     # REQUIRED: G - a graph containing one or more nodes
     #           fail_value - the value to return if the trip cannot be completed (implies some sort of disruption / disconnected nodes)
@@ -733,7 +719,7 @@ def calculate_OD(G, origins, destinations, fail_value):
             destination = destinations[d]
 
             try:
-                shortest_time = nx.shortest_path_length(G, source=origin, target=destination, weight='time')
+                shortest_time = nx.shortest_path_length(Z, source=origin, target=destination, weight='time')
                 OD[o][d] = shortest_time
             except:
                 OD[o][d] = fail_value
@@ -758,14 +744,17 @@ def disrupt_network(G, property, thresh, fail_value):
         if data[property] > thresh:
 
             broken_nodes.append(u)
-    print(broken_nodes)
 
-    for u, v, data in G.edges(data = True):
+    print('nodes disrupted: %s' % len(broken_nodes))
+    i = 0
+    for u, v, data in G_copy.edges(data = True):
 
         if u in broken_nodes or v in broken_nodes:
 
             data['time'] = fail_value
+            i+=1
 
+    print('edges disrupted: %s' % i)
     return G_copy
 
 def randomly_disrupt_network(G, edge_frac, fail_value):
@@ -796,39 +785,6 @@ def randomly_disrupt_network(G, edge_frac, fail_value):
 
     return G_adj, destroy_list
 
-def test_connectivity(G, target_node):
-    #### Function for testing which nodes are currently connected to a network ####
-    # REQUIRED: G - a graph containing one or more nodes and one or more edges
-    #           edge_frac - the percentage of edges to destroy. Interger rather than decimal
-    #           fail_value - the data['time'] property is set to this value to simulate the removal of the edge
-    # RETURNS:  a modified graph with the edited 'time' attribute
-    #           the list of edge IDs randomly chosen for destruction
-    # NOTE:     requires the graph to have an 'edge_id' value in the edge data dictionary. This DOES NOT have to be unique.
-    # -------------------------------------------------------------------------#
-
-    answers, successnodes = [], []
-    worked, failed = 0, 0
-
-    for u in G.nodes:
-        v = target_node
-        try:
-            calc = nx.shortest_path_length(G, source=u, target=v, weight='time')
-            answers.append({'origin':u,'destination':v,'spath':calc})
-            successnodes.append(u)
-            worked +=1
-        except:
-            answers.append({'origin':u,'destination':v,'spath':None})
-            failed +=1
-
-    #### Add attribute for whether node passed connectivity trial
-    for u, data in G.nodes(data = True):
-        if u in successnodes:
-            data['test'] = 'ok'
-        else:
-            data['test'] = 'fail'
-
-    print('connected nodes: %s' % worked)
-    print('broken nodes: %s' % failed)
 
 def gravity_demand(G, origins, destinations, weight, maxtrips = 100, dist_decay = 1, fail_value = 99999999999):
     #### Function for generating a gravity-model based demand matrix ####
@@ -920,7 +876,7 @@ def unbundle_geometry(c):
         return c
 
 
-def save(G, savename, wpath):
+def save(G, savename, wpath, pickle = True, edges = True, nodes = True):
 
     ### function used to save a graph object in a variety of handy formats ###
     # REQUIRED:     G - a graph object
@@ -928,13 +884,14 @@ def save(G, savename, wpath):
     #               wpath - the write path for where the user wants the files saved
     # -------------------------------------------------------------------------#
 
-    new_node_gdf = node_gdf_from_graph(G)
-    new_node_gdf.to_csv(os.path.join(wpath, '%s_nodes.csv' % savename))
-
-    new_edge_gdf = edge_gdf_from_graph(G)
-    new_edge_gdf.to_csv(os.path.join(wpath, '%s_edges.csv' % savename))
-
-    nx.write_gpickle(G, os.path.join(wpath, '%s.pickle' % savename))
+    if nodes == True:
+        new_node_gdf = node_gdf_from_graph(G)
+        new_node_gdf.to_csv(os.path.join(wpath, '%s_nodes.csv' % savename))
+    if edges == True:
+        new_edge_gdf = edge_gdf_from_graph(G)
+        new_edge_gdf.to_csv(os.path.join(wpath, '%s_edges.csv' % savename))
+    if pickle == True:
+        nx.write_gpickle(G, os.path.join(wpath, '%s.pickle' % savename))
 
 
 def add_missing_reflected_edges(G):
@@ -1012,6 +969,7 @@ def convert_to_MultiDiGraph(G):
 
 def simplify_junctions(G, measure_crs, in_crs = {'init': 'epsg:4326'}, thresh = 25):
 
+    # TODO: incorporate speedups from pandana_snap
 
     ### simplifies topology of networks by simplifying node clusters into single
     # nodes
@@ -1677,3 +1635,234 @@ def pandana_snap_points(source_gdf, target_gdf, source_crs = 'epsg:4326', target
         source_gdf['NN'] = list(target_gdf['ID'].iloc[indices])
 
     return source_gdf
+
+def join_networks(base_net, new_net, measure_crs, thresh = 500):
+    ### joins two networks together within a binding threshold ###
+    # REQUIRED:     base_net - a base netowrk object (nx.MultiDiGraph)
+    #               new_net - the network to add on to the base (nx.MultiDiGraph)
+    #               measure_crs - the crs number of the measurement (epsg code)
+    # OPTIONAL:     binding threshold - unit of the crs - default 500m
+    # -------------------------------------------------------------------------#
+
+    from shapely.geometry import LineString
+
+    G_copy = base_net.copy()
+    join_nodes_df = pandana_snap(G_copy,
+                         node_gdf_from_graph(new_net),
+                         source_crs = 'epsg:4326',
+                         target_crs = 'epsg:%s' % measure_crs,
+                         add_dist_to_node_col = True)
+
+    join_nodes_df = join_nodes_df.sort_values(by = 'NN_dist', ascending = True)
+    join_nodes_df = join_nodes_df.loc[join_nodes_df.NN_dist < thresh]
+
+    nodes_to_add, edges_to_add = [],[]
+
+    for u, data in new_net.nodes(data = True):
+        u = 'add_net_%s' % u
+        nodes_to_add.append((u,data))
+
+    for u,v, data in new_net.edges(data = True):
+        u = 'add_net_%s' % u
+        v = 'add_net_%s' % v
+        edges_to_add.append((u,v,data))
+
+    gdf_base = node_gdf_from_graph(base_net)
+    gdf_base = gdf_base.set_index('node_ID')
+
+    for index, row in join_nodes_df.iterrows():
+        u = 'add_net_%s' % row.node_ID
+        v = row.NN
+        data = {}
+        data['length'] = row.NN_dist / 1000
+        data['infra_type'] = 'border_glue'
+        data['Wkt'] = LineString([row.geometry, gdf_base.geometry.loc[v]])
+        edges_to_add.append((u, v, data))
+        edges_to_add.append((v, u, data))
+
+    G_copy.add_nodes_from(nodes_to_add)
+    G_copy.add_edges_from(edges_to_add)
+
+    G_copy = nx.convert_node_labels_to_integers(G_copy)
+
+    return G_copy
+
+def clip(G, bound, source_crs = 'epsg:4326', target_crs = 'epsg:4326', geom_col = 'geometry', largest_G = True):
+    ### removes any edges that fall beyond a polygon, and shortens any other edges that do so ###
+    # REQUIRED:     G - a graph object
+    #               bound - a shapely polygon object
+    # OPTIONAL:     source_crs - crs object in format 'epsg:4326'
+    #               target_crs - crs object in format 'epsg:4326'
+    #               geom_col - label name for geometry object
+    #               largest_G - if True, takes largest remaining subgraph of G as G
+    # -------------------------------------------------------------------------#
+
+    edges_to_add, nodes_to_add = [],[]
+    edges_to_remove, nodes_to_remove = [],[]
+
+    if type(bound) == shapely.geometry.multipolygon.MultiPolygon or type(bound) == shapely.geometry.polygon.Polygon:
+        pass
+    else:
+        raise ValueError('Bound input must be a Shapely Polygon or MultiPolygon object!')
+
+    if type(G) != networkx.classes.multidigraph.MultiDiGraph:
+        raise ValueError('Graph object must be of type networkx.classes.multidigraph.MultiDiGraph!')
+
+    project_WGS_UTM = partial(
+        pyproj.transform,
+        pyproj.Proj(init=source_crs),
+        pyproj.Proj(init=target_crs))
+
+    G_copy = G.copy()
+    print('pre_clip | nodes: %s | edges: %s' % (G_copy.number_of_nodes(), G_copy.number_of_edges()))
+
+    existing_legitimate_point_geometries = {}
+    for u, data in G_copy.nodes(data = True):
+        geo_point = Point(round(data['x'],10),round(data['y'],10))
+        if bound.contains(geo_point):
+            existing_legitimate_point_geometries[u] = geo_point
+        else:
+            nodes_to_remove.append(u)
+
+    iterator = 0
+    done_edges = []
+
+    for u, v, data in G_copy.edges(data = True):
+
+        done_edges.append((v,u))
+
+        if (u,v) in done_edges:
+            pass
+
+        else:
+
+            # define basics from data dictionary
+            infra_type = data['infra_type']
+            geom = data[geom_col]
+
+            # road fully within country - do nothing
+            if bound.contains(geom) == True:
+                pass
+
+            # road fully outside country - remove entirely
+            elif bound.intersects(geom) == False:
+
+                edges_to_remove.append((u, v))
+                edges_to_remove.append((v, u))
+                nodes_to_remove.append(u)
+                nodes_to_remove.append(v)
+
+            # road partially in, partially out
+            else:
+
+                # start by removing existing edges
+                edges_to_remove.append((u, v))
+                edges_to_remove.append((v, u))
+
+                # identify the new line sections inside the boundary
+                new_geom = bound.intersection(geom)
+                if type(new_geom) == shapely.geometry.multilinestring.MultiLineString:
+                    new_geom = linemerge(new_geom)
+
+                # If there is only one:
+                if type(new_geom) == shapely.geometry.linestring.LineString:
+
+                    new_nodes, new_edges, new_node_dict_entries, iterator = new_edge_generator(new_geom,infra_type,iterator,existing_legitimate_point_geometries,geom_col,project_WGS_UTM)
+                    existing_legitimate_point_geometries.update(new_node_dict_entries)
+                    nodes_to_add.append(new_nodes)
+                    edges_to_add.append(new_edges)
+
+                elif type(new_geom) == shapely.geometry.multilinestring.MultiLineString:
+
+                    for n in new_geom:
+                        new_nodes, new_edges, new_node_dict_entries, iterator = new_edge_generator(n,infra_type,iterator,existing_legitimate_point_geometries,geom_col, project_WGS_UTM)
+                        existing_legitimate_point_geometries.update(new_node_dict_entries)
+                        nodes_to_add.append(new_nodes)
+                        edges_to_add.append(new_edges)
+
+    # Remove bad geometries
+    G_copy.remove_nodes_from(nodes_to_remove)
+    G_copy.remove_edges_from(edges_to_remove)
+
+    # Add new geometries
+    nodes_to_add = [item for sublist in nodes_to_add for item in sublist]
+    edges_to_add = [item for sublist in edges_to_add for item in sublist]
+    G_copy.add_nodes_from(nodes_to_add)
+    G_copy.add_edges_from(edges_to_add)
+
+    # Re-label nodes
+    G_copy = nx.convert_node_labels_to_integers(G_copy)
+    print('post_clip | nodes: %s | edges: %s' % (G_copy.number_of_nodes(), G_copy.number_of_edges()))
+
+    # Select only largest remaining graph
+    if largest_G == True:
+        list_of_Gs = list((nx.strongly_connected_component_subgraphs(G_copy)))
+        list_length = list(len(i) for i in list_of_Gs)
+        m = max(list_length)
+        t = [i for i, j in enumerate(list_length) if j == m][0]
+        max_G = list_of_Gs[t]
+        G_copy = max_G
+
+    return G_copy
+
+def new_edge_generator(passed_geom, infra_type, iterator, existing_legitimate_point_geometries, geom_col, project_WGS_UTM):
+    ### Generates new edge and node geometries based on a passed geometry ###
+    # REQUIRED:     passed_geom - a shapely Linestring object
+    #               infra_type - the road / highway class of the passed geometry
+    #               iterator - helps count the new node IDs to keep unique nodes
+    #               existing_legitimate_point_geometries - a dictionary of points already created / valid in [u:geom] format
+    #               project_WGS_UTM - projection object to transform passed geometries
+    # OPTIONAL:     geom_col - label name for geometry object
+    # WARNING:      This is a child process of clip(), and shouldn't be run on its own
+    # -------------------------------------------------------------------------#
+
+    edges_to_add = []
+    nodes_to_add = []
+
+    # new start and end points will be start and end of line
+    u_geo = passed_geom.coords[0]
+    v_geo = passed_geom.coords[-1]
+    u_geom, v_geom = Point(round(u_geo[0],10),round(u_geo[1],10)), Point(round(v_geo[0],10),round(v_geo[1],10))
+
+    # check to see if geometry already exists. If yes, assign u and v node IDs accordingly
+    # else, make a new u and v ID
+    if u_geom in existing_legitimate_point_geometries.values():
+        u = list(existing_legitimate_point_geometries.keys())[list(existing_legitimate_point_geometries.values()).index(u_geom)]
+
+    else:
+        u = 'new_node_%s' % iterator
+        node_data = {}
+        node_data['x'] = u_geom.x
+        node_data['y'] = u_geom.y
+        nodes_to_add.append((u,node_data))
+        iterator += 1
+
+    if v_geom in existing_legitimate_point_geometries.values():
+        v = list(existing_legitimate_point_geometries.keys())[list(existing_legitimate_point_geometries.values()).index(v_geom)]
+
+    else:
+        v = 'new_node_%s' % iterator
+        node_data = {}
+        node_data['x'] = v_geom.x
+        node_data['y'] = v_geom.y
+        nodes_to_add.append((v,node_data))
+        iterator += 1
+
+    # update the data dicionary for the new geometry
+    UTM_geom = transform(project_WGS_UTM, passed_geom)
+    edge_data = {}
+    edge_data[geom_col] = passed_geom
+    edge_data['length'] = UTM_geom.length / 1000
+    edge_data['infra_type'] = infra_type
+
+    # assign new edges to network
+    edges_to_add.append((u, v, edge_data))
+    edges_to_add.append((v, u, edge_data))
+
+    # new node dict entries - add newly created geometries to library of valid nodes
+    new_node_dict_entries = []
+
+    for u, data in nodes_to_add:
+        new_node_dict_entries.append((u,Point(round(data['x'],10),round(data['y'],10))))
+
+    return nodes_to_add, edges_to_add, new_node_dict_entries, iterator
